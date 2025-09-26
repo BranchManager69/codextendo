@@ -729,15 +729,7 @@ schema = {
         "files_touched": {
             "type": "array",
             "description": "Files or directories discussed or modified.",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "notes": {"type": "string"}
-                },
-                "required": ["path"],
-                "additionalProperties": False
-            }
+            "items": {"type": "string"}
         },
         "concerns": {
             "type": "array",
@@ -750,14 +742,23 @@ schema = {
             "items": {"type": "string"}
         }
     },
-    "required": ["summary"],
+    "required": [
+        "summary",
+        "key_actions",
+        "files_touched",
+        "concerns",
+        "follow_up"
+    ],
     "additionalProperties": False
 }
 
 system_prompt = (
     "You are an assistant that summarizes Codex CLI sessions. "
     "Produce a helpful summary and structured data capturing key actions, files mentioned, "
-    "concerns, and follow-up TODOs."
+    "concerns, and follow-up TODOs. Keep the response concise: limit `key_actions` to the top 6 items, "
+    "limit `files_touched` to the top 10 paths, and keep the summary under ~150 words. "
+    "Always include every field from the schema, using empty arrays when there is nothing to list. "
+    "Return JSON that is strictly valid for the provided schema."
 )
 
 user_prompt = (
@@ -773,23 +774,21 @@ payload = {
         {
             "role": "system",
             "content": [
-                {"type": "text", "text": system_prompt}
+                {"type": "input_text", "text": system_prompt}
             ]
         },
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": user_prompt}
+                {"type": "input_text", "text": user_prompt}
             ]
         }
     ],
     "text": {
         "format": {
             "type": "json_schema",
-            "json_schema": {
-                "name": "codextendo_summary",
-                "schema": schema
-            }
+            "name": "codextendo_summary",
+            "schema": schema
         }
     },
     "max_output_tokens": 2048
@@ -814,6 +813,12 @@ if response.status_code != 200:
     raise SystemExit(1)
 
 data = response.json()
+status = data.get('status')
+if status != 'completed':
+    details = data.get('incomplete_details') or {}
+    reason = details.get('reason') or 'unknown'
+    print(f"OpenAI summarizer returned status={status} (reason={reason}).", file=sys.stderr)
+    raise SystemExit(1)
 summary_payload = None
 for block in data.get('output', []):
     for piece in block.get('content', []):
@@ -867,12 +872,15 @@ files_touched = summary_payload.get('files_touched') or []
 if files_touched:
     markdown_lines.append("## Files Touched")
     for item in files_touched:
-        path_value = item.get('path', '')
-        notes = item.get('notes', '')
-        if notes:
-            markdown_lines.append(f"- `{path_value}` – {notes}")
+        if isinstance(item, dict):
+            path_value = item.get('path', '')
+            notes = item.get('notes', '')
+            if notes:
+                markdown_lines.append(f"- `{path_value}` – {notes}")
+            else:
+                markdown_lines.append(f"- `{path_value}`")
         else:
-            markdown_lines.append(f"- `{path_value}`")
+            markdown_lines.append(f"- `{item}`")
     markdown_lines.append("")
 
 concerns = summary_payload.get('concerns') or []
