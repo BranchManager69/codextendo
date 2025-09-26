@@ -783,11 +783,13 @@ payload = {
             ]
         }
     ],
-    "response_format": {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "codextendo_summary",
-            "schema": schema
+    "text": {
+        "format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "codextendo_summary",
+                "schema": schema
+            }
         }
     },
     "max_output_tokens": 2048
