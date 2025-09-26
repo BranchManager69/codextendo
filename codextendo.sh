@@ -703,7 +703,7 @@ if not api_key:
     print('Set OPENAI_API_KEY to summarize conversations.', file=sys.stderr)
     raise SystemExit(1)
 
-model = os.environ.get('CODEXTENDO_SUMMARY_MODEL', 'gpt-4o-mini')
+model = os.environ.get('CODEXTENDO_SUMMARY_MODEL', 'gpt-5-mini')
 
 schema = {
     "type": "object",
