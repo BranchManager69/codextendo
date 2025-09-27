@@ -9,6 +9,8 @@ SOURCE_SNIPPET='[ -f "$HOME/.codextendo/codextendo.sh" ] && source "$HOME/.codex
 mkdir -p "$DEST_DIR"
 cp "$REPO_DIR/codextendo.sh" "$DEST_FILE"
 chmod +x "$DEST_FILE"
+cp "$REPO_DIR/summaries.py" "$DEST_DIR/summaries.py"
+chmod +x "$DEST_DIR/summaries.py"
 
 echo "Installed helper script to $DEST_FILE"
 

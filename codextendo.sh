@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 # 📓 Codex conversation helpers
+CODEXTENDO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CODEXTENDO_SUMMARY_SCRIPT="$CODEXTENDO_DIR/summaries.py"
 codexgrab() {
   local dest=${1:-$HOME/codex-replay}
   mkdir -p "$dest"
@@ -618,20 +620,87 @@ PY
 alias codex-label='codexlabel'
 
 codexsummarize() {
-  local index=${1:-1}
+  local usage='Usage: codexsummarize [--path <session.jsonl>] [--model MODEL] [--max-tokens N] [result #]'
+  local session_path=""
+  local model=""
+  local max_tokens=""
+  local explicit_label=""
+  local index=""
 
-  CODEX_LABEL_FILE="$LABEL_FILE" python3 - "$index" <<'PY'
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --path=*)
+        session_path="${1#*=}"
+        shift
+        ;;
+      --path)
+        session_path="$2"
+        shift 2
+        ;;
+      --label=*)
+        explicit_label="${1#*=}"
+        shift
+        ;;
+      --label)
+        explicit_label="$2"
+        shift 2
+        ;;
+      --model=*)
+        model="${1#*=}"
+        shift
+        ;;
+      --model)
+        model="$2"
+        shift 2
+        ;;
+      --max-tokens=*)
+        max_tokens="${1#*=}"
+        shift
+        ;;
+      --max-tokens)
+        max_tokens="$2"
+        shift 2
+        ;;
+      --help|-h)
+        echo "$usage"
+        return 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -* )
+        echo "$usage" >&2
+        return 1
+        ;;
+      *)
+        if [[ -z "$index" ]]; then
+          index="$1"
+        else
+          echo "$usage" >&2
+          return 1
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -n "$session_path" && ! -e "$session_path" ]]; then
+    echo "Session file not found: $session_path" >&2
+    return 1
+  fi
+
+  if [[ -z "$session_path" ]]; then
+    if [[ -z "$index" ]]; then
+      index=1
+    fi
+    local tmpfile
+    tmpfile=$(mktemp)
+    CODEX_LABEL_FILE="$LABEL_FILE" python3 - "$index" <<'PY' > "$tmpfile"
 import json
 import os
 import pathlib
 import sys
-from datetime import datetime, timezone
-
-try:
-    import requests
-except ModuleNotFoundError:
-    print("Missing Python package 'requests'. Install it with 'pip install requests'.", file=sys.stderr)
-    raise SystemExit(1)
 
 try:
     idx = int(sys.argv[1])
@@ -659,260 +728,142 @@ if idx < 1 or idx > len(matches):
     raise SystemExit(1)
 
 entry = matches[idx - 1]
-session_path = pathlib.Path(entry.get('path', ''))
-if not session_path.exists():
-    print(f"Session file not found: {session_path}", file=sys.stderr)
+path_str = entry.get('path')
+if not path_str:
+    print('Selected result has no path information.', file=sys.stderr)
     raise SystemExit(1)
 
-session_id = session_path.stem
-label = entry.get('label')
-
-messages = []
-with session_path.open('r', encoding='utf-8') as fh:
-    for raw in fh:
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        payload = data.get('payload', {})
-        if payload.get('type') != 'message':
-            continue
-        chunks = payload.get('content') or []
-        text = ''.join(chunk.get('text', '') for chunk in chunks if isinstance(chunk, dict))
-        if not text.strip():
-            continue
-        messages.append({'role': payload.get('role', 'unknown'), 'text': text.strip()})
-
-if not messages:
-    print('No message content found in session.', file=sys.stderr)
-    raise SystemExit(1)
-
-# Keep the most recent portion to stay within model limits
-joined = []
-for message in messages:
-    joined.append(f"{message['role'].upper()}: {message['text']}")
-conversation_text = '\n\n'.join(joined)
-max_chars = 20000
-truncated = False
-if len(conversation_text) > max_chars:
-    conversation_text = conversation_text[-max_chars:]
-    truncated = True
-
-api_key = os.environ.get('OPENAI_API_KEY')
-if not api_key:
-    print('Set OPENAI_API_KEY to summarize conversations.', file=sys.stderr)
-    raise SystemExit(1)
-
-model = os.environ.get('CODEXTENDO_SUMMARY_MODEL', 'gpt-5-mini')
-
-schema = {
-    "type": "object",
-    "properties": {
-        "summary": {"type": "string", "description": "Concise narrative summary of the conversation."},
-        "key_actions": {
-            "type": "array",
-            "description": "List major steps, decisions, or actions discussed.",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "description": {"type": "string"},
-                    "status": {
-                        "type": "string",
-                        "enum": ["completed", "in_progress", "blocked", "planned"],
-                        "description": "Current state of the action."
-                    }
-                },
-                "required": ["description", "status"],
-                "additionalProperties": False
-            }
-        },
-        "files_touched": {
-            "type": "array",
-            "description": "Files or directories discussed or modified.",
-            "items": {"type": "string"}
-        },
-        "concerns": {
-            "type": "array",
-            "description": "Open questions, risks, or blockers raised in the conversation.",
-            "items": {"type": "string"}
-        },
-        "follow_up": {
-            "type": "array",
-            "description": "Concrete next steps or TODOs.",
-            "items": {"type": "string"}
-        }
-    },
-    "required": [
-        "summary",
-        "key_actions",
-        "files_touched",
-        "concerns",
-        "follow_up"
-    ],
-    "additionalProperties": False
-}
-
-system_prompt = (
-    "You are an assistant that summarizes Codex CLI sessions. "
-    "Produce a helpful summary and structured data capturing key actions, files mentioned, "
-    "concerns, and follow-up TODOs. Keep the response concise: limit `key_actions` to the top 6 items, "
-    "limit `files_touched` to the top 10 paths, and keep the summary under ~150 words. "
-    "Always include every field from the schema, using empty arrays when there is nothing to list. "
-    "Return JSON that is strictly valid for the provided schema."
-)
-
-user_prompt = (
-    f"Session ID: {session_id}\n"
-    + (f"Label: {label}\n" if label else "")
-    + ("NOTE: Transcript truncated to recent context.\n\n" if truncated else "\n")
-    + conversation_text
-)
-
-payload = {
-    "model": model,
-    "input": [
-        {
-            "role": "system",
-            "content": [
-                {"type": "input_text", "text": system_prompt}
-            ]
-        },
-        {
-            "role": "user",
-            "content": [
-                {"type": "input_text", "text": user_prompt}
-            ]
-        }
-    ],
-    "text": {
-        "format": {
-            "type": "json_schema",
-            "name": "codextendo_summary",
-            "schema": schema
-        }
-    },
-    "max_output_tokens": 2048
-}
-
-response = requests.post(
-    'https://api.openai.com/v1/responses',
-    headers={
-        'Authorization': f'Bearer {api_key}',
-        'Content-Type': 'application/json'
-    },
-    json=payload,
-    timeout=120
-)
-
-if response.status_code != 200:
-    try:
-        detail = response.json()
-    except Exception:
-        detail = response.text
-    print(f"OpenAI API error ({response.status_code}): {detail}", file=sys.stderr)
-    raise SystemExit(1)
-
-data = response.json()
-status = data.get('status')
-if status != 'completed':
-    details = data.get('incomplete_details') or {}
-    reason = details.get('reason') or 'unknown'
-    print(f"OpenAI summarizer returned status={status} (reason={reason}).", file=sys.stderr)
-    raise SystemExit(1)
-summary_payload = None
-for block in data.get('output', []):
-    for piece in block.get('content', []):
-        if piece.get('type') == 'output_json':
-            summary_payload = piece.get('json')
-        elif piece.get('type') == 'output_text' and summary_payload is None:
-            try:
-                summary_payload = json.loads(piece.get('text', ''))
-            except json.JSONDecodeError:
-                pass
-
-if not summary_payload:
-    print('Failed to parse summary from model response.', file=sys.stderr)
-    raise SystemExit(1)
-
-generated_at = datetime.now(timezone.utc).isoformat()
-
-record = {
-    "session_id": session_id,
-    "label": label,
-    "generated_at": generated_at,
-    "model": model,
-    "truncated": truncated,
-    **summary_payload
-}
-
-summary_dir = pathlib.Path.home() / '.codextendo' / 'summaries'
-summary_dir.mkdir(parents=True, exist_ok=True)
-json_path = summary_dir / f"{session_id}.json"
-json_path.write_text(json.dumps(record, indent=2, ensure_ascii=False))
-
-markdown_lines = [
-    f"# Summary for {session_id}",
-    f"Generated: {generated_at}",
-    ""
-]
-summary_text = summary_payload.get('summary', '').strip()
-if summary_text:
-    markdown_lines.extend(["## TL;DR", summary_text, ""])
-
-key_actions = summary_payload.get('key_actions') or []
-if key_actions:
-    markdown_lines.append("## Key Actions")
-    for action in key_actions:
-        description = action.get('description', '').strip()
-        status = action.get('status', 'unknown')
-        markdown_lines.append(f"- **{status}** – {description}")
-    markdown_lines.append("")
-
-files_touched = summary_payload.get('files_touched') or []
-if files_touched:
-    markdown_lines.append("## Files Touched")
-    for item in files_touched:
-        if isinstance(item, dict):
-            path_value = item.get('path', '')
-            notes = item.get('notes', '')
-            if notes:
-                markdown_lines.append(f"- `{path_value}` – {notes}")
-            else:
-                markdown_lines.append(f"- `{path_value}`")
-        else:
-            markdown_lines.append(f"- `{item}`")
-    markdown_lines.append("")
-
-concerns = summary_payload.get('concerns') or []
-if concerns:
-    markdown_lines.append("## Concerns / Risks")
-    for concern in concerns:
-        markdown_lines.append(f"- {concern}")
-    markdown_lines.append("")
-
-follow_up = summary_payload.get('follow_up') or []
-if follow_up:
-    markdown_lines.append("## Follow-up / TODO")
-    for item in follow_up:
-        markdown_lines.append(f"- {item}")
-    markdown_lines.append("")
-
-if truncated:
-    markdown_lines.append("_Note: Transcript truncated to the most recent portion for summarization._")
-
-md_path = summary_dir / f"{session_id}.md"
-md_path.write_text('\n'.join(markdown_lines))
-
-print(f"Summary saved -> {json_path}")
-print(f"Markdown saved -> {md_path}")
+label = entry.get('label') or ''
+print(path_str)
+print(label)
 PY
+    local status=$?
+    if (( status != 0 )); then
+      rm -f "$tmpfile"
+      return $status
+    fi
+    mapfile -t _summary_meta < "$tmpfile"
+    rm -f "$tmpfile"
+    session_path="${_summary_meta[0]}"
+    if [[ -z "$explicit_label" && -n "${_summary_meta[1]}" ]]; then
+      explicit_label="${_summary_meta[1]}"
+    fi
+  fi
+
+  if [[ -z "$session_path" ]]; then
+    echo "Unable to determine session path." >&2
+    return 1
+  fi
+
+  local summary_script="${CODEXTENDO_SUMMARY_SCRIPT:-}"
+  if [[ -z "$summary_script" || ! -f "$summary_script" ]]; then
+    echo "Summary helper script not found (expected $CODEXTENDO_SUMMARY_SCRIPT)." >&2
+    return 1
+  fi
+
+  local cmd=(python3 "$summary_script" summarize --path "$session_path")
+  if [[ -n "$explicit_label" ]]; then
+    cmd+=(--label "$explicit_label")
+  fi
+  if [[ -n "$model" ]]; then
+    cmd+=(--model "$model")
+  fi
+  if [[ -n "$max_tokens" ]]; then
+    cmd+=(--max-tokens "$max_tokens")
+  fi
+  if [[ -n "$LABEL_FILE" ]]; then
+    cmd+=(--label-file "$LABEL_FILE")
+  fi
+
+  "${cmd[@]}"
+}
+
+codextendo_refresh() {
+  local usage='Usage: codextendo refresh [--limit N] [--force] [--model MODEL] [--max-tokens N]'
+  local limit=""
+  local force=0
+  local model=""
+  local max_tokens=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --limit=*)
+        limit="${1#*=}"
+        shift
+        ;;
+      --limit)
+        limit="$2"
+        shift 2
+        ;;
+      --model=*)
+        model="${1#*=}"
+        shift
+        ;;
+      --model)
+        model="$2"
+        shift 2
+        ;;
+      --max-tokens=*)
+        max_tokens="${1#*=}"
+        shift
+        ;;
+      --max-tokens)
+        max_tokens="$2"
+        shift 2
+        ;;
+      --force)
+        force=1
+        shift
+        ;;
+      --help|-h)
+        echo "$usage"
+        return 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -* )
+        echo "$usage" >&2
+        return 1
+        ;;
+      *)
+        echo "$usage" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  local summary_script="${CODEXTENDO_SUMMARY_SCRIPT:-}"
+  if [[ -z "$summary_script" || ! -f "$summary_script" ]]; then
+    echo "Summary helper script not found (expected $CODEXTENDO_SUMMARY_SCRIPT)." >&2
+    return 1
+  fi
+
+  local cmd=(python3 "$summary_script" refresh)
+  if [[ -n "$limit" ]]; then
+    cmd+=(--limit "$limit")
+  fi
+  if (( force )); then
+    cmd+=(--force)
+  fi
+  if [[ -n "$model" ]]; then
+    cmd+=(--model "$model")
+  fi
+  if [[ -n "$max_tokens" ]]; then
+    cmd+=(--max-tokens "$max_tokens")
+  fi
+
+  "${cmd[@]}"
 }
 
 codexresume() {
   local index=${1:-1}
+  local resume_snippet=""
+  local resume_label=""
 
-  local session_id
-  session_id=$(python3 - "$index" <<'PY'
+  local _resume_meta
+  mapfile -t _resume_meta < <(python3 - "$index" <<'PY'
 import json
 import pathlib
 import sys
@@ -956,23 +907,70 @@ if len(uuid_parts) != 5 or any(not part for part in uuid_parts):
     raise SystemExit(1)
 
 session_id = '-'.join(uuid_parts)
-print(session_id, end='')
+snippet = entry.get('snippet') or ''
+label = entry.get('label') or ''
+
+print(session_id)
+print(snippet)
+print(label)
 PY
 ) || return 1
 
+  local session_id="${_resume_meta[0]//$'\r'/}"
   session_id=${session_id//$'\n'/}
   if [[ -z "$session_id" ]]; then
     echo "Unable to derive session id." >&2
     return 1
   fi
 
+  resume_snippet="${_resume_meta[1]-}"
+  resume_snippet=${resume_snippet//$'\r'/}
+  resume_snippet="${resume_snippet//$'\n'/ }"
+  resume_label="${_resume_meta[2]-}"
+  resume_label=${resume_label//$'\r'/}
+  resume_label=${resume_label//$'\n'/}
+
   if ! command -v codex >/dev/null 2>&1; then
     echo "codex CLI not found; skipping resume." >&2
     return 1
   fi
 
+  local resume_prompt_disabled=${CODEXTENDO_RESUME_PROMPT_DISABLED:-0}
+  local resume_prompt=""
+  local resume_query="${CODEXTENDO_RESUME_QUERY:-}"
+
+  if (( ! resume_prompt_disabled )); then
+    if [[ -n "${CODEXTENDO_RESUME_PROMPT_OVERRIDE:-}" ]]; then
+      resume_prompt=${CODEXTENDO_RESUME_PROMPT_OVERRIDE}
+    elif [[ -n "${CODEXTENDO_RESUME_PROMPT:-}" ]]; then
+      resume_prompt=${CODEXTENDO_RESUME_PROMPT}
+    else
+      resume_prompt=$'Hey, we got disconnected and my memory is foggy. Please give me a quick, easy-to-digest catch-up:\n- Past: what we just did or decided.\n- Present: where things stand right now and any blockers.\n- Future: what we planned or should tackle next.\n\nHighlight any files, commands, or links I should reopen.'
+    fi
+
+    if [[ -n "$resume_prompt" && -z "${CODEXTENDO_RESUME_PROMPT_OVERRIDE:-}" ]]; then
+      local context=""
+      if [[ -n "$resume_snippet" ]]; then
+        context="\n\nContext I last saw: \"$resume_snippet\""
+      fi
+      if [[ -n "$resume_label" ]]; then
+        resume_prompt+=$'\n\n'
+        resume_prompt+="(Resumed from labeled session: '$resume_label')"
+      fi
+      if [[ -n "$resume_query" ]]; then
+        resume_prompt+=$'\n\n'
+        resume_prompt+="(Search query: \"$resume_query\")"
+      fi
+      resume_prompt+=$context
+    fi
+  fi
+
   printf 'Resuming Codex session %s\n' "$session_id"
-  codex resume "$session_id"
+  if (( resume_prompt_disabled )) || [[ -z "$resume_prompt" ]]; then
+    codex resume "$session_id"
+  else
+    codex resume "$session_id" "$resume_prompt"
+  fi
 }
 
 codexopen() {
@@ -1131,6 +1129,16 @@ codextendo() {
   local positional_limit=""
   local search_opts=()
   local summary_flag=0
+  local resume_prompt_override=""
+  local resume_prompt_override_set=0
+  local resume_prompt_disabled=0
+  local resume_prompt_disabled_set=0
+
+  if [[ $# -gt 0 && "$1" == "refresh" ]]; then
+    shift
+    codextendo_refresh "$@"
+    return $?
+  fi
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1150,6 +1158,11 @@ codextendo() {
         summary_flag=1
         shift
         ;;
+      --summary|--summary-only)
+        summary_flag=1
+        open_mode="none"
+        shift
+        ;;
       --summarize-only)
         summary_flag=1
         open_mode="none"
@@ -1167,6 +1180,31 @@ codextendo() {
         search_opts+=("$1")
         shift
         ;;
+      --resume-prompt)
+        if [[ $# -lt 2 ]]; then
+          echo "--resume-prompt requires a value" >&2
+          return 1
+        fi
+        resume_prompt_override_set=1
+        resume_prompt_override="$2"
+        resume_prompt_disabled=0
+        resume_prompt_disabled_set=1
+        shift 2
+        ;;
+      --resume-prompt=*)
+        resume_prompt_override_set=1
+        resume_prompt_override="${1#*=}"
+        resume_prompt_disabled=0
+        resume_prompt_disabled_set=1
+        shift
+        ;;
+      --no-resume-prompt)
+        resume_prompt_disabled=1
+        resume_prompt_disabled_set=1
+        resume_prompt_override=""
+        resume_prompt_override_set=1
+        shift
+        ;;
       --help|-h)
         cat <<'USAGE'
 Usage: codextendo [options] <query> [limit]
@@ -1177,6 +1215,8 @@ Options:
   --resume-only      Resume only (default).
   --summarize        Generate a structured summary in addition to the chosen open mode.
   --summarize-only   Generate a summary without resuming or exporting the session.
+  --resume-prompt X  Send X as the first message after resuming (overrides default).
+  --no-resume-prompt Skip sending the automatic catch-up request when resuming.
   --limit N          Limit results to N entries (can also pass as positional argument).
   --plain            Disable colors in output (passthrough to codexsearch).
 USAGE
@@ -1209,7 +1249,7 @@ USAGE
     limit_arg="$positional_limit"
   fi
 
-  local search_args=("--open" "--open-mode=$open_mode")
+  local search_args=("--open-mode=$open_mode")
   if (( summary_flag )); then
     search_args+=("--summary")
   fi
@@ -1219,5 +1259,69 @@ USAGE
     search_args+=("$limit_arg")
   fi
 
+  local _prev_prompt_override_set=0
+  local _prev_prompt_override_value=""
+  if [[ -v CODEXTENDO_RESUME_PROMPT_OVERRIDE ]]; then
+    _prev_prompt_override_set=1
+    _prev_prompt_override_value="$CODEXTENDO_RESUME_PROMPT_OVERRIDE"
+  fi
+
+  local _prev_prompt_disabled_set=0
+  local _prev_prompt_disabled_value=""
+  if [[ -v CODEXTENDO_RESUME_PROMPT_DISABLED ]]; then
+    _prev_prompt_disabled_set=1
+    _prev_prompt_disabled_value="$CODEXTENDO_RESUME_PROMPT_DISABLED"
+  fi
+
+  local _prev_resume_query_set=0
+  local _prev_resume_query_value=""
+  if [[ -v CODEXTENDO_RESUME_QUERY ]]; then
+    _prev_resume_query_set=1
+    _prev_resume_query_value="$CODEXTENDO_RESUME_QUERY"
+  fi
+
+  local _modified_override=0
+  if (( resume_prompt_override_set )); then
+    CODEXTENDO_RESUME_PROMPT_OVERRIDE="$resume_prompt_override"
+    _modified_override=1
+  fi
+
+  local _modified_disabled=0
+  if (( resume_prompt_disabled_set )); then
+    if (( resume_prompt_disabled )); then
+      CODEXTENDO_RESUME_PROMPT_DISABLED=1
+    else
+      unset CODEXTENDO_RESUME_PROMPT_DISABLED
+    fi
+    _modified_disabled=1
+  fi
+
+  CODEXTENDO_RESUME_QUERY="$pattern"
+
   codexsearch "${search_args[@]}"
+  local search_status=$?
+
+  if (( _modified_override )); then
+    if (( _prev_prompt_override_set )); then
+      CODEXTENDO_RESUME_PROMPT_OVERRIDE="$_prev_prompt_override_value"
+    else
+      unset CODEXTENDO_RESUME_PROMPT_OVERRIDE
+    fi
+  fi
+
+  if (( _modified_disabled )); then
+    if (( _prev_prompt_disabled_set )); then
+      CODEXTENDO_RESUME_PROMPT_DISABLED="$_prev_prompt_disabled_value"
+    else
+      unset CODEXTENDO_RESUME_PROMPT_DISABLED
+    fi
+  fi
+
+  if (( _prev_resume_query_set )); then
+    CODEXTENDO_RESUME_QUERY="$_prev_resume_query_value"
+  else
+    unset CODEXTENDO_RESUME_QUERY
+  fi
+
+  return $search_status
 }

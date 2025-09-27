@@ -4,7 +4,8 @@ Convenience commands for searching and exporting Codex CLI transcripts from the 
 
 ## Features
 - `codextendo <query>` – run the full flow: search, pick a result, and automatically resume the session in the Codex CLI.
-- `codextendo --summarize` – generate structured JSON + Markdown summaries (key actions, files, concerns, follow-ups) for any session.
+- `codextendo --summary` – generate structured JSON + Markdown summaries (key actions, files, concerns, follow-ups) for any session and append a history entry for future reference. (`--summarize` still works and also resumes the session.)
+- `codextendo refresh` – batch refresh summaries for every Codex session (skips unchanged conversations using a local cache).
 - `codexsearch <query>` – fuzzy-ish search across `~/.codex/sessions`, shows timestamps, relative ages, labels, and highlighted snippets.
 - Interactive picker with colored prompt and `Enter` to skip; remembers last results for quick openings.
 - `codexlabel <result #> "Title"` – assign readable names to conversations, auto-disambiguates duplicates, and `--clear` removes a label.
@@ -40,10 +41,13 @@ The installer copies `codextendo.sh` to `~/.codextendo/` and appends a sourcing 
 codextendo "optionally set enable transcript logs"
 
 # Generate a structured summary (JSON + Markdown) without resuming
-codextendo --summarize-only "optionally set enable transcript logs"
+codextendo --summary "optionally set enable transcript logs"
 
 # Resume + summarize in one shot
 codextendo --summarize "optionally set enable transcript logs"
+
+# Refresh summaries for every session (use --force to rebuild everything)
+codextendo refresh
 
 # Other helpers
 codexsearch "optionally set enable transcript logs"
@@ -54,9 +58,22 @@ codex-last
 codex-list 5
 ```
 
+Resuming via `codextendo` also drops a catch-up message so the assistant reminds you what you were doing. By default it asks for a Past/Present/Future recap and includes the search query plus the last transcript snippet for context. Customise it any time:
+
+- Override for a single run: `codextendo --resume-prompt "short reminder" <query>`
+- Skip it once: `codextendo --no-resume-prompt <query>`
+- Change the default for all shells: `export CODEXTENDO_RESUME_PROMPT="..."`
+- Disable globally: `export CODEXTENDO_RESUME_PROMPT_DISABLED=1`
+
 Labels are stored in `~/.codex/search_labels.json`. They accept any characters; exports sanitize labels for filenames automatically.
 
 Summaries are written to `~/.codextendo/summaries/<session-id>.json` (plus a companion Markdown file).
+
+Each run also appends an entry to `~/.codextendo/summaries/<session-id>.history.md`, capturing the model used, token budget, and the condensed summary timeline.
+
+### Optional web dashboard
+
+If you prefer a UI, the `~/websites/codextendo-dashboard` Next.js app surfaces the same data. After `npm install` in that directory you can run `npm run dev` locally, or `npm run build && npm run start` under PM2.
 
 ## Uninstall
 Remove the sourcing snippet from your shell rc files and delete `~/.codextendo`. For example:
