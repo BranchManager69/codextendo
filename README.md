@@ -1,29 +1,27 @@
 # Codextendo
 
-Convenience commands for searching and exporting Codex CLI transcripts from the shell.
+Codextendo is a set of Bash helpers that make it painless to find, resume, and summarise OpenAI Codex CLI sessions. It layers a smart picker on top of `codex resume`, turns conversations into structured JSON/Markdown summaries, and keeps an append-only history so you never lose context.
 
 ## Features
-- `codextendo <query>` – run the full flow: search, pick a result, and automatically resume the session in the Codex CLI.
-- `codextendo --summary` – generate structured JSON + Markdown summaries (key actions, files, concerns, follow-ups) for any session and append a history entry for future reference. (`--summarize` still works and also resumes the session.)
-- `codextendo refresh` – batch refresh summaries for every Codex session (skips unchanged conversations using a local cache).
-- `codexsearch <query>` – fuzzy-ish search across `~/.codex/sessions`, shows timestamps, relative ages, labels, and highlighted snippets.
-- Interactive picker with colored prompt and `Enter` to skip; remembers last results for quick openings.
-- `codexlabel <result #> "Title"` – assign readable names to conversations, auto-disambiguates duplicates, and `--clear` removes a label.
-- `codexopen <result #>` – exports the selected session to plain text, automatically appending any label to the filename.
-- Shortcuts `codex-last` (export most recent session) and `codex-list` (list recent sessions).
+- **One-liner resume:** `codextendo <query>` searches your Codex transcripts, lets you pick a result, and re-opens it in the Codex CLI with an automatic Past/Present/Future catch-up prompt (so the assistant reminds you what you were doing).
+- **Rich summaries:** `codextendo --summary` (and `--summarize`) writes JSON + Markdown summaries, appends a Markdown history timeline, and stores everything in `~/.codextendo/summaries/`.
+- **Batch refresh:** `codextendo refresh` rebuilds summaries for every session, skipping unchanged files by using a local hash cache.
+- **Supporting helpers:** `codexsearch`, `codexlabel`, `codexopen`, `codex-list`, and `codex-last` cover fuzzy search, labelling, exporting, and quick listing.
+- **Optional UI:** the companion Next.js dashboard under `~/websites/codextendo-dashboard` reads the same summaries for a browser view.
 
 ## Requirements
-- Bash (or compatible shell sourcing Bash functions)
+- Bash (or another shell that can source Bash functions)
 - Python 3.9+
-- `jq`
-- `requests` Python package (for summaries)
-- `OPENAI_API_KEY` (for summaries)
+- [`jq`](https://stedolan.github.io/jq/) for transcript processing
+- [`requests`](https://pypi.org/project/requests/) Python package (used by the summariser)
+- [`tiktoken`](https://pypi.org/project/tiktoken/) _(optional, but recommended for precise token counting)_
+- `OPENAI_API_KEY` environment variable (needed for summaries)
 
 ## Installation
 ```bash
 # clone the repo somewhere convenient
 cd ~/tools
-git clone <your-fork-url> codextendo
+git clone https://github.com/BranchManager69/codextendo.git
 cd codextendo
 
 # run the installer
@@ -33,7 +31,7 @@ cd codextendo
 source ~/.bashrc   # or open a new terminal
 ```
 
-The installer copies `codextendo.sh` to `~/.codextendo/` and appends a sourcing snippet to `~/.bashrc`, `~/.zshrc`, and `~/.bash_aliases` if needed.
+The installer copies `codextendo.sh` (and the Python summariser) to `~/.codextendo/` and appends a sourcing snippet to `~/.bashrc`, `~/.zshrc`, and `~/.bash_aliases` if needed.
 
 ## Usage
 ```bash
@@ -58,22 +56,48 @@ codex-last
 codex-list 5
 ```
 
-Resuming via `codextendo` also drops a catch-up message so the assistant reminds you what you were doing. By default it asks for a Past/Present/Future recap and includes the search query plus the last transcript snippet for context. Customise it any time:
+### Resume catch-up prompts
+Every resume sends a first-turn message so the assistant can catch you up:
 
-- Override for a single run: `codextendo --resume-prompt "short reminder" <query>`
-- Skip it once: `codextendo --no-resume-prompt <query>`
-- Change the default for all shells: `export CODEXTENDO_RESUME_PROMPT="..."`
+```
+Hey, we got disconnected and my memory is foggy. Please give me a quick, easy-to-digest catch-up:
+- Past: what we just did or decided.
+- Present: where things stand right now and any blockers.
+- Future: what we planned or should tackle next.
+```
+
+The helper automatically appends the search query, the last transcript snippet, and (if present) the session label. Customise or disable it any time:
+
+- Override once: `codextendo --resume-prompt "quick recap please" <query>`
+- Skip once: `codextendo --no-resume-prompt <query>`
+- Change the default globally: `export CODEXTENDO_RESUME_PROMPT="..."`
 - Disable globally: `export CODEXTENDO_RESUME_PROMPT_DISABLED=1`
 
-Labels are stored in `~/.codex/search_labels.json`. They accept any characters; exports sanitize labels for filenames automatically.
+### Summaries, history, and storage
+- JSON and Markdown summaries live in `~/.codextendo/summaries/<session-id>.{json,md}`.
+- Each summarise run also appends `~/.codextendo/summaries/<session-id>.history.md` with a timestamped Past/Present/Future log.
+- `codextendo refresh` writes an index file (`index.json`) alongside the summaries so the dashboard and CLI can load metadata quickly.
 
-Summaries are written to `~/.codextendo/summaries/<session-id>.json` (plus a companion Markdown file).
+### Configuration
+Use CLI flags or environment variables to tune behaviour:
 
-Each run also appends an entry to `~/.codextendo/summaries/<session-id>.history.md`, capturing the model used, token budget, and the condensed summary timeline.
+- `CODEXTENDO_SUMMARY_MODEL` – default model for summaries (defaults to `gpt-5`).
+- `CODEXTENDO_SUMMARY_TOKEN_LIMIT` – max tokens passed to the summariser (default `200000`).
+- `CODEX_LABEL_FILE` – alternate path for stored labels (defaults to `~/.codex/search_labels.json`).
+- `CODEXTENDO_RESUME_PROMPT` / `CODEXTENDO_RESUME_PROMPT_DISABLED` – tweak or turn off the automatic recap.
+- `--summary-dir` / `--sessions-dir` flags (on the Python helper) let you redirect where summaries and source transcripts live.
+
+Labels are stored in `~/.codex/search_labels.json`. They accept any characters; exports sanitise labels for filenames automatically.
 
 ### Optional web dashboard
+If you prefer a UI, the `~/websites/codextendo-dashboard` Next.js app surfaces the same data. After `npm install` in that directory you can run:
 
-If you prefer a UI, the `~/websites/codextendo-dashboard` Next.js app surfaces the same data. After `npm install` in that directory you can run `npm run dev` locally, or `npm run build && npm run start` under PM2.
+```bash
+npm run dev             # local development on http://localhost:3000
+npm run build && npm run start
+```
+
+The dashboard honours `CODEXTENDO_SUMMARY_DIR` (or defaults to `~/.codextendo/summaries`).
 
 ## Uninstall
 Remove the sourcing snippet from your shell rc files and delete `~/.codextendo`. For example:
