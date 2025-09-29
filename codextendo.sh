@@ -293,13 +293,18 @@ matches = []
 for path in files:
     try:
         with path.open("r", encoding="utf-8") as fh:
+            session_cwd = None
             for line in fh:
                 try:
                     data = json.loads(line)
                 except json.JSONDecodeError:
                     continue
                 payload = data.get("payload", {})
-                if payload.get("type") != "message":
+                payload_type = payload.get("type")
+                if payload_type == "session_meta" and session_cwd is None:
+                    session_cwd = payload.get("cwd")
+                    continue
+                if payload_type != "message":
                     continue
                 chunks = payload.get("content") or []
                 text = "".join(chunk.get("text", "") for chunk in chunks if isinstance(chunk, dict))
@@ -338,6 +343,7 @@ for path in files:
                     "path": str(path),
                     "snippet": snippet,
                     "label": label_map.get(str(path)),
+                    "cwd": session_cwd,
                 })
                 break
     except (UnicodeDecodeError, OSError):
@@ -368,6 +374,11 @@ for idx, entry in enumerate(matches, start=1):
     ts_str = paint(stamp_text, "36")
     snippet_str = highlight_snippet(entry["snippet"])
     prefix = paint('...', '90') if use_color else '...'
+    session_cwd = entry.get("cwd") or ""
+    if session_cwd:
+        cwd_str = paint(session_cwd, '90') if use_color else session_cwd
+    else:
+        cwd_str = ""
     label = entry.get("label")
     if label:
         label_display = paint(f"[{label}]", "1;34") if use_color else f"[{label}]"
@@ -375,6 +386,8 @@ for idx, entry in enumerate(matches, start=1):
     else:
         print(f"{index_str} {ts_str}")
     print(f"   {prefix} {snippet_str}")
+    if cwd_str:
+        print(f"   @ {cwd_str}")
 
 print()
 
@@ -913,6 +926,7 @@ label = entry.get('label') or ''
 print(session_id)
 print(snippet)
 print(label)
+print(entry.get('cwd') or '')
 PY
 ) || return 1
 
@@ -929,6 +943,9 @@ PY
   resume_label="${_resume_meta[2]-}"
   resume_label=${resume_label//$'\r'/}
   resume_label=${resume_label//$'\n'/}
+  local resume_cwd="${_resume_meta[3]-}"
+  resume_cwd=${resume_cwd//$'\r'/}
+  resume_cwd=${resume_cwd//$'\n'/}
 
   if ! command -v codex >/dev/null 2>&1; then
     echo "codex CLI not found; skipping resume." >&2
@@ -938,6 +955,66 @@ PY
   local resume_prompt_disabled=${CODEXTENDO_RESUME_PROMPT_DISABLED:-0}
   local resume_prompt=""
   local resume_query="${CODEXTENDO_RESUME_QUERY:-}"
+  local auto_cd_flag="${CODEXTENDO_AUTO_CD:-}"
+  local use_color=0
+  local color_label=""
+  local color_path=""
+  local color_warn=""
+  local color_reset=""
+
+  if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-dumb}" != "dumb" ]]; then
+    use_color=1
+    color_label=$'\033[1;34m'
+    color_path=$'\033[36m'
+    color_warn=$'\033[1;31m'
+    color_reset=$'\033[0m'
+  fi
+
+  if [[ -n "$resume_cwd" ]]; then
+    local display_cwd="$resume_cwd"
+    if (( use_color )); then
+      display_cwd="${color_path}${resume_cwd}${color_reset}"
+    fi
+    if (( use_color )); then
+      printf '%sSession cwd:%s %s\n' "$color_label" "$color_reset" "$display_cwd"
+    else
+      printf 'Session cwd: %s\n' "$resume_cwd"
+    fi
+    case "$auto_cd_flag" in
+      1|true|TRUE|yes|YES|on|ON)
+        if [[ -d "$resume_cwd" ]]; then
+          if builtin cd -- "$resume_cwd"; then
+            if (( use_color )); then
+              printf '%sChanged directory:%s %s\n' "$color_label" "$color_reset" "$display_cwd"
+            else
+              printf 'Changed directory to %s\n' "$resume_cwd"
+            fi
+          else
+            if (( use_color )); then
+              printf '%sUnable to change directory to %s%s\n' "$color_warn" "$resume_cwd" "$color_reset" >&2
+            else
+              printf 'Unable to change directory to %s\n' "$resume_cwd" >&2
+            fi
+          fi
+        else
+          if (( use_color )); then
+            printf '%sSession cwd missing on disk:%s %s\n' "$color_warn" "$color_reset" "$resume_cwd" >&2
+          else
+            printf 'Session cwd missing on disk: %s\n' "$resume_cwd" >&2
+          fi
+        fi
+        ;;
+    esac
+  fi
+
+  local current_dir="$(pwd)"
+  local display_pwd="$current_dir"
+  if (( use_color )); then
+    display_pwd="${color_path}${current_dir}${color_reset}"
+    printf '%sCurrent directory:%s %s\n' "$color_label" "$color_reset" "$display_pwd"
+  else
+    printf 'Current directory: %s\n' "$current_dir"
+  fi
 
   if (( ! resume_prompt_disabled )); then
     if [[ -n "${CODEXTENDO_RESUME_PROMPT_OVERRIDE:-}" ]]; then
@@ -1133,10 +1210,30 @@ codextendo() {
   local resume_prompt_override_set=0
   local resume_prompt_disabled=0
   local resume_prompt_disabled_set=0
+  local auto_cd_override_set=0
+  local auto_cd_override_value=""
 
   if [[ $# -gt 0 && "$1" == "refresh" ]]; then
     shift
     codextendo_refresh "$@"
+    return $?
+  fi
+
+  if [[ $# -gt 0 && ("$1" == "sizes" || "$1" == "session-sizes") ]]; then
+    shift
+    python3 "$CODEXTENDO_SUMMARY_SCRIPT" session-sizes "$@"
+    return $?
+  fi
+
+  if [[ $# -gt 0 && "$1" == "transcript" ]]; then
+    shift
+    python3 "$CODEXTENDO_SUMMARY_SCRIPT" transcript "$@"
+    return $?
+  fi
+
+  if [[ $# -gt 0 && "$1" == "metadata" ]]; then
+    shift
+    python3 "$CODEXTENDO_SUMMARY_SCRIPT" metadata "$@"
     return $?
   fi
 
@@ -1166,6 +1263,16 @@ codextendo() {
       --summarize-only)
         summary_flag=1
         open_mode="none"
+        shift
+        ;;
+      --auto-cd)
+        auto_cd_override_set=1
+        auto_cd_override_value=1
+        shift
+        ;;
+      --no-auto-cd)
+        auto_cd_override_set=1
+        auto_cd_override_value=0
         shift
         ;;
       --limit=*)
@@ -1215,6 +1322,8 @@ Options:
   --resume-only      Resume only (default).
   --summarize        Generate a structured summary in addition to the chosen open mode.
   --summarize-only   Generate a summary without resuming or exporting the session.
+  --auto-cd          Change into the session's recorded cwd before resuming.
+  --no-auto-cd       Skip changing directories regardless of environment defaults.
   --resume-prompt X  Send X as the first message after resuming (overrides default).
   --no-resume-prompt Skip sending the automatic catch-up request when resuming.
   --limit N          Limit results to N entries (can also pass as positional argument).
@@ -1280,6 +1389,13 @@ USAGE
     _prev_resume_query_value="$CODEXTENDO_RESUME_QUERY"
   fi
 
+  local _prev_auto_cd_set=0
+  local _prev_auto_cd_value=""
+  if [[ -v CODEXTENDO_AUTO_CD ]]; then
+    _prev_auto_cd_set=1
+    _prev_auto_cd_value="$CODEXTENDO_AUTO_CD"
+  fi
+
   local _modified_override=0
   if (( resume_prompt_override_set )); then
     CODEXTENDO_RESUME_PROMPT_OVERRIDE="$resume_prompt_override"
@@ -1294,6 +1410,12 @@ USAGE
       unset CODEXTENDO_RESUME_PROMPT_DISABLED
     fi
     _modified_disabled=1
+  fi
+
+  local _modified_auto_cd=0
+  if (( auto_cd_override_set )); then
+    CODEXTENDO_AUTO_CD="$auto_cd_override_value"
+    _modified_auto_cd=1
   fi
 
   CODEXTENDO_RESUME_QUERY="$pattern"
@@ -1314,6 +1436,14 @@ USAGE
       CODEXTENDO_RESUME_PROMPT_DISABLED="$_prev_prompt_disabled_value"
     else
       unset CODEXTENDO_RESUME_PROMPT_DISABLED
+    fi
+  fi
+
+  if (( _modified_auto_cd )); then
+    if (( _prev_auto_cd_set )); then
+      CODEXTENDO_AUTO_CD="$_prev_auto_cd_value"
+    else
+      unset CODEXTENDO_AUTO_CD
     fi
   fi
 

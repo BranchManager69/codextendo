@@ -11,6 +11,14 @@ cp "$REPO_DIR/codextendo.sh" "$DEST_FILE"
 chmod +x "$DEST_FILE"
 cp "$REPO_DIR/summaries.py" "$DEST_DIR/summaries.py"
 chmod +x "$DEST_DIR/summaries.py"
+cp "$REPO_DIR/config.py" "$DEST_DIR/config.py"
+cp "$REPO_DIR/pricing.py" "$DEST_DIR/pricing.py"
+
+PRICING_SRC="$REPO_DIR/resources/pricing"
+if [[ -d "$PRICING_SRC" ]]; then
+  mkdir -p "$DEST_DIR/resources/pricing"
+  cp "$PRICING_SRC"/*.json "$DEST_DIR/resources/pricing/" >/dev/null 2>&1 || true
+fi
 
 echo "Installed helper script to $DEST_FILE"
 
